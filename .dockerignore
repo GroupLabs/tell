@@ -1,0 +1,19 @@
+target/
+bench/
+notes/
+tests/
+
+# package manager artifacts
+Cargo.lock
+
+# temp files
+*.rs.bk
+*.tmp
+*.swp
+
+# version control
+#.git/
+.gitignore/
+
+# example files
+index.html

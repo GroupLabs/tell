@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Test HTML with JavaScript</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                background-color: #f4f4f4;
+                margin: 0;
+                padding: 20px;
+            }
+            h1 {
+                color: #333;
+            }
+            p {
+                font-size: 18px;
+                color: #555;
+            }
+            button {
+                padding: 10px 20px;
+                font-size: 16px;
+                color: white;
+                background-color: #333;
+                border: none;
+                cursor: pointer;
+                border-radius: 5px;
+            }
+            button:hover {
+                background-color: #555;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Hello, Actix with JavaScript!</h1>
+        <p>
+            This is a simple HTML file for testing the file upload functionality
+            of your Actix server.
+        </p>
+        <p>Click the button below to trigger a JavaScript alert.</p>
+
+        <button onclick="displayMessage()">Click Me!</button>
+
+        <script>
+            function displayMessage() {
+                alert(
+                    "Hello! This is a JavaScript alert triggered by the button.",
+                );
+            }
+        </script>
+    </body>
+</html>

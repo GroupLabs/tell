@@ -1,0 +1,51 @@
+<!-- Couldn't think of a better way to test CORS  -->
+<!-- For this test, try running  python3 -m http.server 3000  -->
+<!-- This will start a server at 3000 (to simulate the frontend server)  -->
+<!-- The button should test to see if the origin is allowed in the backend  -->
+
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>CORS Test</title>
+    </head>
+    <body>
+        <h1>Test CORS with Backend</h1>
+        <button id="test-button">Test CORS Request</button>
+
+        <script>
+            document
+                .getElementById("test-button")
+                .addEventListener("click", function () {
+                    const formData = new FormData();
+                    formData.append(
+                        "file",
+                        new Blob(["<html><body>Test HTML</body></html>"], {
+                            type: "text/html",
+                        }),
+                        "test.html",
+                    );
+
+                    fetch("http://localhost:8000/upload", {
+                        method: "POST",
+                        body: formData,
+                    })
+                        .then((response) => {
+                            if (!response.ok) {
+                                throw new Error("Network response was not ok");
+                            }
+                            return response.text();
+                        })
+                        .then((data) => {
+                            console.log("Success:", data);
+                            alert("Response from server: " + data);
+                        })
+                        .catch((error) => {
+                            console.error("Error during fetch:", error);
+                            alert("CORS request failed: " + error);
+                        });
+                });
+        </script>
+    </body>
+</html>
