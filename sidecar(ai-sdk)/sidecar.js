@@ -2,6 +2,7 @@ import "dotenv/config.js";
 import express from "express";
 import { streamText } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
+import { openai } from "@ai-sdk/openai";
 
 const app = express();
 app.use(express.json());
@@ -13,18 +14,24 @@ app.post("/sdk-chat", async (req, res) => {
     temperature = 0.2,
   } = req.body;
 
-  const result = streamText({
-    model: anthropic(model, { apiKey: process.env.ANTHROPIC_API_KEY }),
+  let sdkModel;
+  const lowerModel = model.toLowerCase();
+  if (lowerModel.startsWith("claude")) {
+    sdkModel = anthropic(model, { apiKey: process.env.ANTHROPIC_API_KEY });
+  } else {
+    sdkModel = openai(model, { apiKey: process.env.OPENAI_API_KEY });
+  }
 
+  const providerOptions = lowerModel.startsWith("claude")
+    ? { anthropic: { thinking: { type: "enabled", budgetTokens: 12_000 } } }
+    : {};
+
+  const result = streamText({
+    model: sdkModel,
     messages,
     temperature,
     stream: true,
-
-    providerOptions: {
-      anthropic: {
-        thinking: { type: "enabled", budgetTokens: 12_000 },
-      },
-    },
+    providerOptions,
   });
 
   result.pipeDataStreamToResponse(res, {
