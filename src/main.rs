@@ -35,11 +35,16 @@ async fn main() -> std::io::Result<()> {
                     .allowed_headers(vec![
                         actix_web::http::header::CONTENT_TYPE,
                         actix_web::http::header::AUTHORIZATION,
+                        actix_web::http::header::ACCEPT_ENCODING,
+                    ])
+                    .expose_headers(vec![
+                        actix_web::http::header::CONTENT_TYPE,
                     ])
                     .supports_credentials()
                     .max_age(3600),
             )
             .route("/", web::get().to(health_check))
+            .route("/health", web::get().to(health_check))
             .route("/metrics", web::get().to(|| async { HttpResponse::Ok().finish() }))
             .route("/llm/generate", web::post().to(generate))
             .default_service(web::route().to(not_found))
@@ -88,40 +93,60 @@ pub async fn generate(req: HttpRequest, body: Bytes) -> Result<HttpResponse, Err
         fwd = fwd.insert_header(("openai-organization", org.clone()));
     }
 
+    // Force uncompressed response from upstream
+    fwd = fwd.insert_header(("accept-encoding", "identity"));
+
     info!("Forwarding to {}", target_url);
     let res = fwd.send_body(clean_body).await.map_err(|e| {
         error!("Forwarding failed: {e}");
         actix_web::error::ErrorBadGateway(format!("forwarding failed: {e}"))
     })?;
 
+    // Build a new response without copying Content-Encoding headers
     let mut client_resp = HttpResponse::build(res.status());
     for (k, v) in res.headers() {
-        client_resp.append_header((k.clone(), v.clone()));
+        let header_name = k.as_str().to_lowercase();
+        // Skip problematic headers that could cause encoding conflicts
+        if header_name != "content-encoding" && header_name != "transfer-encoding" {
+            client_resp.append_header((k.clone(), v.clone()));
+        }
     }
 
-    Ok(client_resp.streaming(PassthroughStream::new(res)))
+    // Ensure the content-type is set properly
+    client_resp.append_header(("content-type", "application/json"));
+
+    // Use a stream handler that captures the full response first
+    Ok(client_resp.streaming(ResponseCollector::new(res)))
 }
 
-struct PassthroughStream<B> {
+struct ResponseCollector<B> {
     inner: ClientResponse<B>,
 }
 
-impl<B> PassthroughStream<B> {
+impl<B> ResponseCollector<B> {
     fn new(res: ClientResponse<B>) -> Self {
         Self { inner: res }
     }
 }
 
-impl<B> Stream for PassthroughStream<B>
+impl<B> Stream for ResponseCollector<B>
 where
     B: Stream<Item = Result<Bytes, PayloadError>> + Unpin,
 {
     type Item = Result<Bytes, Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().inner)
-            .poll_next(cx)
-            .map_ok(Bytes::from)
-            .map_err(|e| actix_web::error::ErrorBadGateway(e))
+        match Pin::new(&mut self.get_mut().inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                // Return the bytes as-is without any transformation
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                error!("Error in response stream: {e}");
+                Poll::Ready(Some(Err(actix_web::error::ErrorBadGateway(e))))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
