@@ -35,19 +35,21 @@ app.post("/sdk-chat", async (req, res) => {
     ? { anthropic: { thinking: { type: "enabled", budgetTokens: 12_000 } } }
     : {};
 
+  const tools = {
+    executeSQL: {
+      description:
+        "Run an SQL statement against the current table and return the result.",
+      parameters: z.object({
+        sql: z.string().describe("The complete SQL query"),
+      }),
+    },
+  };
+
   const result = streamText({
     model: sdkModel,
     messages,
     maxSteps: 5,
-    tools: {
-      executeSQL: {
-        description:
-          "Run an SQL statement against the current table and return the result.",
-        parameters: z.object({
-          sql: z.string().describe("The complete SQL query"),
-        }),
-      },
-    },
+    tools: tools,
     temperature,
     stream: true,
     providerOptions,
