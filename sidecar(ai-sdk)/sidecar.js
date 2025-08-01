@@ -38,9 +38,17 @@ app.post("/sdk-chat", async (req, res) => {
   const tools = {
     executeSQL: {
       description:
-        "Run an SQL statement against the current table and return the result.",
+        "Run a SQL query for immediate results without adding it to the transformation pipeline. Use for exploratory queries, data inspection, or when users want to see results right away.",
       parameters: z.object({
-        sql: z.string().describe("The complete SQL query"),
+        sql: z.string().describe("The complete DuckDB-compatible SQL query. CRITICAL: Use proper SQL syntax only - no English phrases! Use: = (not 'equals'), < (not 'less than'), > (not 'greater than'), BETWEEN x AND y (not 'IS BETWEEN' or 'is around'), LIKE '%pattern%' (not 'contains'), IS NULL/IS NOT NULL only. Example: WHERE age BETWEEN 20 AND 30 (correct), NOT WHERE age IS BETWEEN 20 AND 30 (wrong)"),
+      }),
+    },
+    addTransformation: {
+      description:
+        "Add a SQL transformation step to the data pipeline. Use when users want to filter, transform, or process data as part of their workflow.",
+      parameters: z.object({
+        sql: z.string().describe("The SQL query for the transformation. Use 'previous_step' to reference the output of the last transformation, or reference other transformation outputs by their alias names."),
+        outputAlias: z.string().describe("A meaningful name for this transformation step using underscores (e.g., 'filtered_data', 'high_value_orders', 'aggregated_results')"),
       }),
     },
   };
