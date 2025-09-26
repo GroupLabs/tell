@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Frontend Request</title>
+</head>
+<body>
+    <h1>Test AI SDK Request</h1>
+    <button onclick="testRequest()">Send Request</button>
+    <div id="result"></div>
+
+    <script>
+        async function testRequest() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = 'Sending request...';
+
+            try {
+                const response = await fetch('http://localhost:3010/sdk-chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Origin': 'http://localhost:3000'
+                    },
+                    body: JSON.stringify({
+                        messages: [{ role: 'user', content: 'Hello' }],
+                        model: 'claude-3-5-sonnet-20241022',
+                        temperature: 0.2,
+                        maxSteps: 10  // This is what AI SDK might be sending
+                    })
+                });
+
+                console.log('Response status:', response.status);
+                console.log('Response headers:', [...response.headers.entries()]);
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    resultDiv.innerHTML = `Error ${response.status}: ${errorText}`;
+                } else {
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let result = '';
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        const chunk = decoder.decode(value);
+                        result += chunk;
+                        resultDiv.innerHTML = result;
+                    }
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                resultDiv.innerHTML = `Error: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>
