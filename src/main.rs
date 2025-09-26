@@ -92,13 +92,6 @@ fn default_temperature() -> f32 {
 }
 
 #[derive(Debug, Serialize)]
-struct ToolParameter {
-    #[serde(rename = "type")]
-    param_type: String,
-    description: String,
-}
-
-#[derive(Debug, Serialize)]
 struct ToolInputSchema {
     #[serde(rename = "type")]
     schema_type: String,
@@ -162,10 +155,13 @@ fn create_tools() -> Vec<Tool> {
 }
 
 async fn sdk_chat(body: web::Bytes) -> Result<HttpResponse, Error> {
+    info!("Raw request body: {}", String::from_utf8_lossy(&body));
+
     let request: ChatRequest = serde_json::from_slice(&body)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid JSON: {}", e)))?;
 
-    info!("Request: {} ({})", request.model, request.messages.len());
+    info!("Parsed request: model={}, messages={}, temperature={}, max_steps={:?}",
+          request.model, request.messages.len(), request.temperature, request.max_steps);
 
     // Determine provider based on model name
     let is_claude = request.model.to_lowercase().starts_with("claude");
@@ -209,10 +205,14 @@ async fn handle_anthropic_request(request: ChatRequest) -> Result<HttpResponse, 
     // Add tools if any
     if !tools.is_empty() {
         request_body["tools"] = json!(tools);
+        info!("Added {} tools to Anthropic request", tools.len());
+        info!("Tools: {}", serde_json::to_string_pretty(&tools).unwrap_or_default());
         if let Some(max_steps) = request.max_steps {
             request_body["max_tokens"] = json!(max_steps * 1000); // Rough estimation
         }
     }
+
+    info!("Sending request to Anthropic: {}", serde_json::to_string_pretty(&request_body).unwrap_or_default());
 
     let response = client
         .post("https://api.anthropic.com/v1/messages")
@@ -244,7 +244,11 @@ async fn handle_anthropic_request(request: ChatRequest) -> Result<HttpResponse, 
             Ok(chunk) => {
                 // Parse Anthropic SSE format and convert to AI SDK format
                 let chunk_str = String::from_utf8_lossy(&chunk);
+                info!("Anthropic raw chunk: {}", chunk_str);
                 let converted = convert_anthropic_to_ai_sdk(&chunk_str);
+                if !converted.is_empty() {
+                    info!("Converted to AI SDK: {}", converted);
+                }
                 Ok::<Bytes, reqwest::Error>(Bytes::from(converted))
             }
             Err(e) => {
@@ -319,7 +323,10 @@ async fn handle_openai_request(request: ChatRequest) -> Result<HttpResponse, Err
             .collect();
         request_body["tools"] = json!(openai_tools);
         info!("Added {} tools to OpenAI request", openai_tools.len());
+        info!("Tools: {}", serde_json::to_string_pretty(&openai_tools).unwrap_or_default());
     }
+
+    info!("Sending request to OpenAI: {}", serde_json::to_string_pretty(&request_body).unwrap_or_default());
 
     let response = client
         .post("https://api.openai.com/v1/chat/completions")
@@ -350,7 +357,11 @@ async fn handle_openai_request(request: ChatRequest) -> Result<HttpResponse, Err
             Ok(chunk) => {
                 // Parse OpenAI SSE format and convert to AI SDK format
                 let chunk_str = String::from_utf8_lossy(&chunk);
+                info!("OpenAI raw chunk: {}", chunk_str);
                 let converted = convert_openai_to_ai_sdk(&chunk_str);
+                if !converted.is_empty() {
+                    info!("Converted to AI SDK: {}", converted);
+                }
                 Ok::<Bytes, reqwest::Error>(Bytes::from(converted))
             }
             Err(e) => {
@@ -384,12 +395,14 @@ fn convert_anthropic_to_ai_sdk(chunk: &str) -> String {
             }
 
             if let Ok(parsed) = serde_json::from_str::<Value>(data_part) {
+                info!("Anthropic parsed data: {}", serde_json::to_string(&parsed).unwrap_or_default());
                 // Convert Anthropic delta format to AI SDK v5 format
                 if let Some(event_type) = parsed.get("type").and_then(|t| t.as_str()) {
                     match event_type {
                         "content_block_delta" => {
                             if let Some(delta) = parsed.get("delta") {
                                 if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                    info!("Anthropic text delta: {}", text);
                                     // AI SDK v5 format: 0:"text content"
                                     result.push_str(&format!(
                                         "0:{}\n",
@@ -460,6 +473,7 @@ fn convert_openai_to_ai_sdk(chunk: &str) -> String {
             }
 
             if let Ok(parsed) = serde_json::from_str::<Value>(data_part) {
+                info!("OpenAI parsed data: {}", serde_json::to_string(&parsed).unwrap_or_default());
                 // Convert OpenAI delta format to AI SDK v5 format
                 if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
                     if let Some(choice) = choices.first() {
@@ -475,6 +489,7 @@ fn convert_openai_to_ai_sdk(chunk: &str) -> String {
 
                             // Handle tool calls
                             if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                                info!("Found tool_calls in delta: {:?}", tool_calls);
                                 let mut tc_map = TOOL_CALLS.lock().unwrap();
 
                                 for tool_call in tool_calls {
