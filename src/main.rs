@@ -291,7 +291,8 @@ async fn handle_openai_request(request: ChatRequest) -> Result<HttpResponse, Err
     let mut request_body = json!({
         "model": request.model,
         "messages": messages,
-        "stream": true
+        "stream": true,
+        "stream_options": { "include_usage": true }
     });
 
     // Only add temperature for models that support it
@@ -349,20 +350,58 @@ async fn handle_openai_request(request: ChatRequest) -> Result<HttpResponse, Err
             status
         )));
     }
-
     // Convert OpenAI streaming response to AI SDK format
     let stream = response.bytes_stream();
+
     let ai_sdk_stream = stream.map(|chunk_result| {
         match chunk_result {
             Ok(chunk) => {
-                // Parse OpenAI SSE format and convert to AI SDK format
                 let chunk_str = String::from_utf8_lossy(&chunk);
                 info!("OpenAI raw chunk: {}", chunk_str);
-                let converted = convert_openai_to_ai_sdk(&chunk_str);
-                if !converted.is_empty() {
-                    info!("Converted to AI SDK: {}", converted);
+
+                let mut out = String::new();
+                let mut handled_any = false;
+
+                for line in chunk_str.split("\n\n") {
+                    if let Some(json_str) = line.strip_prefix("data: ") {
+                        let json_str = json_str.trim();
+
+                        if json_str == "[DONE]" {
+                            out.push_str("data: {\"type\":\"done\"}\n\n");
+                            handled_any = true;
+                            continue;
+                        }
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                            if let Some(usage_val) = v.get("usage") {
+                                if !usage_val.is_null() {
+                                    let usage_event = serde_json::json!({
+                                        "type": "usage",
+                                        "usage": usage_val
+                                    })
+                                    .to_string();
+
+                                    out.push_str("data: ");
+                                    out.push_str(&usage_event);
+                                    out.push_str("\n\n");
+                                    handled_any = true;
+                                }
+                            }
+                            let converted = convert_openai_to_ai_sdk(json_str);
+                            if !converted.is_empty() {
+                                out.push_str(&converted);
+                                handled_any = true;
+                            }
+                        }
+                    }
                 }
-                Ok::<Bytes, reqwest::Error>(Bytes::from(converted))
+                if !handled_any {
+                    let converted = convert_openai_to_ai_sdk(&chunk_str);
+                    if !converted.is_empty() {
+                        out.push_str(&converted);
+                    }
+                }
+
+                Ok::<Bytes, reqwest::Error>(Bytes::from(out))
             }
             Err(e) => {
                 let error_msg = format!(
@@ -373,6 +412,9 @@ async fn handle_openai_request(request: ChatRequest) -> Result<HttpResponse, Err
             }
         }
     });
+
+
+
 
     Ok(HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
