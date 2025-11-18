@@ -32,8 +32,15 @@ async fn main() -> std::io::Result<()> {
             .wrap(prometheus.clone())
             .wrap(
                 Cors::default()
+                    // Local development
                     .allowed_origin("http://localhost:3000")
                     .allowed_origin("http://localhost:5173")
+                    // Production - Cloudflare Pages
+                    .allowed_origin_fn(|origin, _req_head| {
+                        origin.as_bytes().ends_with(b".pages.dev") ||
+                        origin.as_bytes().ends_with(b".azurecontainerapps.io") ||
+                        origin.as_bytes().starts_with(b"http://localhost")
+                    })
                     .allowed_methods(vec!["GET", "POST", "OPTIONS"])
                     .allowed_headers(vec![
                         actix_web::http::header::CONTENT_TYPE,
@@ -69,7 +76,18 @@ async fn not_found() -> impl Responder {
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
     role: String,
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    // AI SDK v5 includes tool calls and results in messages
+    #[serde(default, rename = "tool_calls")]
+    tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(default, rename = "tool_call_id")]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    // AI SDK v5 also includes tool invocations (results) in assistant messages
+    #[serde(default, rename = "toolInvocations")]
+    tool_invocations: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +150,50 @@ fn create_tools() -> Vec<Tool> {
         })
     );
 
+    let mut create_visualization_properties = serde_json::Map::new();
+    create_visualization_properties.insert(
+        "type".to_string(),
+        json!({
+            "type": "string",
+            "description": "The type of chart to create: 'bar', 'line', 'scatter', 'pie', 'area', or 'heatmap'. IMPORTANT: Different chart types require different data structures - bar/pie charts need aggregated/grouped data, while scatter plots need raw x,y pairs."
+        })
+    );
+    create_visualization_properties.insert(
+        "title".to_string(),
+        json!({
+            "type": "string",
+            "description": "A descriptive title for the visualization"
+        })
+    );
+    create_visualization_properties.insert(
+        "xAxis".to_string(),
+        json!({
+            "type": "string",
+            "description": "The column name to use for the x-axis (or category column for pie charts)"
+        })
+    );
+    create_visualization_properties.insert(
+        "yAxis".to_string(),
+        json!({
+            "type": "string",
+            "description": "The column name to use for the y-axis (or value column for pie charts). For bar/pie charts, this should typically be an aggregated value (COUNT, SUM, AVG, etc.)"
+        })
+    );
+    create_visualization_properties.insert(
+        "sql".to_string(),
+        json!({
+            "type": "string",
+            "description": "Optional custom SQL query to fetch chart-specific data. CRITICAL: Provide aggregated SQL for bar/pie charts! Examples: Bar chart: 'SELECT category, COUNT(*) as count FROM table GROUP BY category LIMIT 20', Pie chart: 'SELECT region, SUM(sales) as total FROM table GROUP BY region', Line chart: 'SELECT date, AVG(value) as avg_value FROM table GROUP BY date ORDER BY date', Scatter: 'SELECT x_col, y_col FROM table LIMIT 1000'. If not provided, a basic query will be generated based on chart type."
+        })
+    );
+    create_visualization_properties.insert(
+        "description".to_string(),
+        json!({
+            "type": "string",
+            "description": "Optional description explaining what the visualization shows"
+        })
+    );
+
     vec![
         Tool {
             name: "executeSQL".to_string(),
@@ -149,6 +211,15 @@ fn create_tools() -> Vec<Tool> {
                 schema_type: "object".to_string(),
                 properties: add_transformation_properties,
                 required: vec!["sql".to_string(), "outputAlias".to_string()],
+            },
+        },
+        Tool {
+            name: "createVisualization".to_string(),
+            description: "Create a data visualization (chart) from query results. Use when users ask to visualize, chart, graph, or plot data. Supports bar charts, line charts, scatter plots, pie charts, area charts, and heatmaps.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: create_visualization_properties,
+                required: vec!["type".to_string(), "xAxis".to_string(), "yAxis".to_string()],
             },
         },
     ]
@@ -183,14 +254,81 @@ async fn handle_anthropic_request(request: ChatRequest) -> Result<HttpResponse, 
     let tools = create_tools();
 
     // Convert messages to Anthropic format
+    // AI SDK v5 sends tool results embedded in assistant messages with toolInvocations
+    // We need to convert these appropriately for each provider
     let messages: Vec<Value> = request
         .messages
         .into_iter()
-        .map(|msg| {
-            json!({
+        .flat_map(|msg| {
+            let mut result_messages = Vec::new();
+
+            // First, add the main message (user or assistant)
+            let mut message = json!({
                 "role": msg.role,
-                "content": msg.content
-            })
+            });
+
+            // Add content if present
+            if let Some(content) = msg.content {
+                message["content"] = json!(content);
+            }
+
+            // Add tool_calls if present (assistant messages with tool calls)
+            if let Some(tool_calls) = msg.tool_calls {
+                message["tool_calls"] = json!(tool_calls);
+            }
+
+            // Add tool_call_id if present (tool result messages - legacy format)
+            if let Some(tool_call_id) = msg.tool_call_id {
+                message["tool_call_id"] = json!(tool_call_id);
+            }
+
+            // Add name if present (for tool results, name = tool name)
+            if let Some(name) = msg.name {
+                message["name"] = json!(name);
+            }
+
+            result_messages.push(message);
+
+            // If this is an assistant message with toolInvocations (AI SDK v5 format),
+            // we need to handle them appropriately for Anthropic
+            if let Some(ref tool_invocations) = msg.tool_invocations {
+                // First, reconstruct tool_calls for the assistant message
+                let tool_calls: Vec<Value> = tool_invocations.iter().map(|invocation| {
+                    let tool_call_id = invocation.get("toolCallId").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool_name = invocation.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+                    let args = invocation.get("args").cloned().unwrap_or(json!({}));
+
+                    json!({
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+                        }
+                    })
+                }).collect();
+
+                // Update the assistant message to include tool_calls
+                if !tool_calls.is_empty() {
+                    result_messages[0]["tool_calls"] = json!(tool_calls);
+                }
+
+                // Then add tool result messages (Anthropic uses user role for tool results)
+                for invocation in tool_invocations {
+                    if let Some(_tool_call_id) = invocation.get("toolCallId").and_then(|v| v.as_str()) {
+                        if let Some(result) = invocation.get("result") {
+                            // Anthropic format for tool results
+                            let tool_result_message = json!({
+                                "role": "user", // Anthropic treats tool results as user messages
+                                "content": serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+                            });
+                            result_messages.push(tool_result_message);
+                        }
+                    }
+                }
+            }
+
+            result_messages
         })
         .collect();
 
@@ -270,29 +408,122 @@ async fn handle_anthropic_request(request: ChatRequest) -> Result<HttpResponse, 
 }
 
 async fn handle_openai_request(request: ChatRequest) -> Result<HttpResponse, Error> {
-    let api_key = env::var("OPENAI_API_KEY")
-        .map_err(|_| actix_web::error::ErrorInternalServerError("OPENAI_API_KEY not set"))?;
+    // Check if Azure OpenAI is configured (takes priority)
+    let use_azure = env::var("AZURE_OPENAI_ENDPOINT").is_ok();
+
+    let (api_endpoint, api_key, auth_header) = if use_azure {
+        let endpoint = env::var("AZURE_OPENAI_ENDPOINT")
+            .map_err(|_| actix_web::error::ErrorInternalServerError("AZURE_OPENAI_ENDPOINT not set"))?;
+        let key = env::var("AZURE_OPENAI_KEY")
+            .map_err(|_| actix_web::error::ErrorInternalServerError("AZURE_OPENAI_KEY not set"))?;
+        let deployment = env::var("AZURE_OPENAI_DEPLOYMENT")
+            .unwrap_or_else(|_| "gpt-4o".to_string()); // Default deployment name
+
+        let url = format!("{}/openai/deployments/{}/chat/completions?api-version=2024-08-01-preview",
+            endpoint.trim_end_matches('/'), deployment);
+        info!("Using Azure OpenAI endpoint: {}", url);
+        (url, key, "api-key")
+    } else {
+        let key = env::var("OPENAI_API_KEY")
+            .map_err(|_| actix_web::error::ErrorInternalServerError("OPENAI_API_KEY not set"))?;
+        ("https://api.openai.com/v1/chat/completions".to_string(), key, "Authorization")
+    };
 
     let client = Client::new();
     let tools = create_tools();
 
     // Convert messages to OpenAI format
+    // AI SDK v5 sends tool results embedded in assistant messages with toolInvocations
+    // We need to convert these to OpenAI's format: separate "tool" role messages
     let messages: Vec<Value> = request
         .messages
         .into_iter()
-        .map(|msg| {
-            json!({
+        .flat_map(|msg| {
+            let mut result_messages = Vec::new();
+
+            // First, add the main message (user or assistant)
+            let mut message = json!({
                 "role": msg.role,
-                "content": msg.content
-            })
+            });
+
+            // Add content if present
+            if let Some(content) = msg.content {
+                message["content"] = json!(content);
+            }
+
+            // Add tool_calls if present (assistant messages with tool calls)
+            if let Some(tool_calls) = msg.tool_calls {
+                message["tool_calls"] = json!(tool_calls);
+            }
+
+            // Add tool_call_id if present (tool result messages - legacy format)
+            if let Some(tool_call_id) = msg.tool_call_id {
+                message["tool_call_id"] = json!(tool_call_id);
+            }
+
+            // Add name if present (for tool results, name = tool name)
+            if let Some(name) = msg.name {
+                message["name"] = json!(name);
+            }
+
+            result_messages.push(message);
+
+            // If this is an assistant message with toolInvocations (AI SDK v5 format),
+            // we need to:
+            // 1. Add the assistant message with tool_calls reconstructed from toolInvocations
+            // 2. Add separate "tool" role messages for each result
+            if let Some(ref tool_invocations) = msg.tool_invocations {
+                // First, reconstruct tool_calls for the assistant message
+                let tool_calls: Vec<Value> = tool_invocations.iter().map(|invocation| {
+                    let tool_call_id = invocation.get("toolCallId").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool_name = invocation.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+                    let args = invocation.get("args").cloned().unwrap_or(json!({}));
+
+                    json!({
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+                        }
+                    })
+                }).collect();
+
+                // Update the assistant message to include tool_calls
+                if !tool_calls.is_empty() {
+                    result_messages[0]["tool_calls"] = json!(tool_calls);
+                }
+
+                // Then add tool result messages
+                for invocation in tool_invocations {
+                    if let Some(tool_call_id) = invocation.get("toolCallId").and_then(|v| v.as_str()) {
+                        if let Some(result) = invocation.get("result") {
+                            // OpenAI expects tool results as separate messages with role: "tool"
+                            let tool_result_message = json!({
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+                            });
+                            result_messages.push(tool_result_message);
+                        }
+                    }
+                }
+            }
+
+            result_messages
         })
         .collect();
 
     let mut request_body = json!({
-        "model": request.model,
         "messages": messages,
         "stream": true
     });
+
+    // Azure OpenAI doesn't need model in request body (it's in the URL path)
+    // But regular OpenAI does need it
+    if !use_azure {
+        request_body["model"] = json!(request.model);
+    }
 
     // Only add temperature for models that support it
     // o1, o3, and gpt-5 models don't support custom temperature
@@ -326,12 +557,21 @@ async fn handle_openai_request(request: ChatRequest) -> Result<HttpResponse, Err
         info!("Tools: {}", serde_json::to_string_pretty(&openai_tools).unwrap_or_default());
     }
 
-    info!("Sending request to OpenAI: {}", serde_json::to_string_pretty(&request_body).unwrap_or_default());
+    info!("Sending request to {}: {}", if use_azure { "Azure OpenAI" } else { "OpenAI" },
+        serde_json::to_string_pretty(&request_body).unwrap_or_default());
 
-    let response = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
+    let mut req = client
+        .post(&api_endpoint)
+        .header("Content-Type", "application/json");
+
+    // Set auth header based on provider
+    req = if use_azure {
+        req.header("api-key", &api_key)
+    } else {
+        req.header("Authorization", format!("Bearer {}", api_key))
+    };
+
+    let response = req
         .json(&request_body)
         .send()
         .await

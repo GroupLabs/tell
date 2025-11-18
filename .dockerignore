@@ -1,19 +1,15 @@
 target/
+node_modules/
+.git/
+*.log
+.env
+.DS_Store
 bench/
+grafana/
 notes/
 tests/
-
-# package manager artifacts
-Cargo.lock
-
-# temp files
-*.rs.bk
-*.tmp
-*.swp
-
-# version control
-#.git/
-.gitignore/
-
-# example files
-index.html
+*.html
+docker-compose.yml
+loki-config.yml
+prometheus.yml
+promtail-config.yml
